@@ -3,6 +3,7 @@ FROM python:3.10-slim-bullseye as builder
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -16,6 +17,7 @@ FROM python:3.10-slim-bullseye
 
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /root/.local /root/.local
