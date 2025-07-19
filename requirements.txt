@@ -1,0 +1,6 @@
+pyrogram==2.0.106
+requests==2.31.0
+git+https://github.com/openai/whisper.git
+tqdm
+python-dotenv==1.0.0
+ffmpeg-python==0.2.0

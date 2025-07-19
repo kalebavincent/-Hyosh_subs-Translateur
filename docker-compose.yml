@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  transcription-bot:
+    image: ghcr.io/votre-utilisateur/transcription-bot:latest
+    build: .
+    container_name: transcription-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - model-cache:/root/.cache/whisper
+
+volumes:
+  model-cache:
