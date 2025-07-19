@@ -10,14 +10,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message,
-    InputFile,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    ReplyKeyboardMarkup
+    CallbackQuery
 )
+from dotenv import load_dotenv
 
-# Configuration Whisper
-WHISPER_MODEL = "tiny"  # Modèle par défaut
+load_dotenv()
+
+WHISPER_MODEL = "tiny"
 MODEL_LOAD_TIMES = {
     "tiny": 0.5,
     "base": 1,
@@ -27,29 +28,30 @@ MODEL_LOAD_TIMES = {
 }
 
 # Configuration DeepL
-
 DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
 SOURCE_LANG = "JA"
 TARGET_LANG = "FR"
 
 # Configuration Pyrogram
-API_ID = int(os.getenv("API_ID"))
+API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY")
 
 # Configuration sécurité
-ALLOWED_USERS = [12345678, 87654321]  # Liste des IDs autorisés
+ALLOWED_USERS = os.getenv("ALLOWED_USERS", "")
+# Convertit en liste d'entiers
+if ALLOWED_USERS:
+    ALLOWED_USERS = [int(uid.strip()) for uid in ALLOWED_USERS.split(",") if uid.strip().isdigit()]
+else:
+    ALLOWED_USERS = []
 
-# Configuration serveur
 HEALTH_SERVER_PORT = 8080
 HEALTH_SERVER_ADDRESS = '0.0.0.0'
 
-# Stockage des modèles par utilisateur
 user_models = {}
 user_status = {}
 
-# Initialiser le client Pyrogram
 app = Client(
     "transcription_bot",
     api_id=API_ID,
@@ -74,7 +76,7 @@ def run_health_server():
     server.serve_forever()
 
 def format_timestamp(seconds):
-    millis = int((seconds - int(seconds)) * 1000
+    millis = int((seconds - int(seconds)) * 1000)
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
@@ -218,13 +220,12 @@ async def translate_srt_content(srt_content: str, status_msg: Message):
         translated_content += f"{num}\n{timecode}\n{translated}\n\n"
         processed += 1
 
-        # Respect des limites API
         await asyncio.sleep(0.1)
 
     return translated_content
 
 @app.on_callback_query(filters.regex(r"^cancel_operation$"))
-async def cancel_operation(_, query):
+async def cancel_operation(_, query: CallbackQuery):
     user_id = query.from_user.id
     user_status[user_id] = {"cancelled": True}
     await query.answer("Opération annulée!")
@@ -233,7 +234,7 @@ async def cancel_operation(_, query):
 @app.on_message(filters.command(["start", "help"]))
 async def start_command(client: Client, message: Message):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
-        await message.reply_text("❌ Accès non autorisé")
+        await message.reply_text("❌ Accès non autorisé, contacter l'administrateur. (@Hyoshdesign)")
         return
 
     keyboard = InlineKeyboardMarkup([
@@ -254,7 +255,7 @@ async def start_command(client: Client, message: Message):
     await message.reply_text(help_text, reply_markup=keyboard)
 
 @app.on_callback_query(filters.regex(r"^select_model$"))
-async def select_model(_, query):
+async def select_model(_, query: CallbackQuery):
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("Tiny ⚡", callback_data="model_tiny"),
@@ -281,7 +282,7 @@ async def select_model(_, query):
     )
 
 @app.on_callback_query(filters.regex(r"^model_(tiny|base|small|medium|large)$"))
-async def set_model(_, query):
+async def set_model(_, query: CallbackQuery):
     model = query.data.split("_")[1]
     user_models[query.from_user.id] = model
     await query.answer(f"Modèle défini: {model.capitalize()}")
@@ -289,31 +290,58 @@ async def set_model(_, query):
 
 @app.on_message(filters.command("model"))
 async def model_command(client: Client, message: Message):
-    await select_model(client, message)
+    # Créer un nouveau message pour la sélection du modèle
+    current_model = user_models.get(message.from_user.id, WHISPER_MODEL)
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Tiny ⚡", callback_data="model_tiny"),
+            InlineKeyboardButton("Base 🚀", callback_data="model_base")
+        ],
+        [
+            InlineKeyboardButton("Small 🐇", callback_data="model_small"),
+            InlineKeyboardButton("Medium 🐢", callback_data="model_medium")
+        ],
+        [InlineKeyboardButton("Large 🐘", callback_data="model_large")]
+    ])
 
-@app.on_message(filters.command("transcribe"))
-async def transcribe_command(client: Client, message: Message):
-    await handle_media(message, translate=False)
+    await message.reply_text(
+        f"🔧 **Sélectionnez un modèle Whisper**\n"
+        f"Modèle actuel: **{current_model.upper()}**\n\n"
+        "⚖️ **Précision / Vitesse:**\n"
+        "Tiny: Très rapide, précision faible\n"
+        "Base: Rapide, précision moyenne\n"
+        "Small: Équilibré\n"
+        "Medium: Lent, bonne précision\n"
+        "Large: Très lent, meilleure précision",
+        reply_markup=keyboard
+    )
 
-@app.on_message(filters.command("translate"))
-async def translate_command(client: Client, message: Message):
-    if message.reply_to_message and message.reply_to_message.document:
-        if message.reply_to_message.document.file_name.endswith('.srt'):
-            await handle_translation(message)
-            return
-    await message.reply_text("🔍 Répondez à un fichier SRT avec /translate")
-
-@app.on_message(filters.audio | filters.video | filters.voice | filters.document)
-async def handle_media(client: Client, message: Message, translate=True):
+async def process_media(client: Client, message: Message, translate=True):
     if ALLOWED_USERS and message.from_user.id not in ALLOWED_USERS:
-        await message.reply_text("❌ Accès non autorisé")
+        await message.reply_text("❌ Accès non autorisé, contacter l'administrateur. (@Hyoshdesign)")
+        return
+
+    is_srt = (message.document and
+              message.document.file_name and
+              message.document.file_name.endswith('.srt'))
+
+    if is_srt:
+        await handle_translation(client, message)
         return
 
     if message.document and not message.document.mime_type.startswith(('audio/', 'video/')):
         return
 
     model_name = user_models.get(message.from_user.id, WHISPER_MODEL)
-    file_size = message.audio.file_size if message.audio else message.document.file_size
+
+    if message.audio:
+        file_size = message.audio.file_size
+    elif message.document:
+        file_size = message.document.file_size
+    else:
+        await message.reply_text("❌ Format de fichier non supporté.")
+        return
+
     size_mb = file_size / (1024 * 1024)
 
     status_msg = await message.reply_text(
@@ -385,7 +413,7 @@ async def handle_media(client: Client, message: Message, translate=True):
 
     await status_msg.delete()
 
-async def handle_translation(message: Message):
+async def handle_translation(client: Client, message: Message):
     status_msg = await message.reply_text(
         "⏳ **Démarrage de la traduction**\n\n"
         "0% " + progress_bar(0),
@@ -420,6 +448,22 @@ async def handle_translation(message: Message):
     os.remove(srt_path)
     os.remove(translated_srt)
     await status_msg.delete()
+
+@app.on_message(filters.command("transcribe"))
+async def transcribe_command(client: Client, message: Message):
+    await process_media(client, message, translate=False)
+
+@app.on_message(filters.command("translate"))
+async def translate_command(client: Client, message: Message):
+    if message.reply_to_message and message.reply_to_message.document:
+        if message.reply_to_message.document.file_name and message.reply_to_message.document.file_name.endswith('.srt'):
+            await handle_translation(client, message)
+            return
+    await message.reply_text("🔍 Répondez à un fichier SRT avec /translate")
+
+@app.on_message(filters.audio | filters.video | filters.voice | filters.document)
+async def handle_media(client: Client, message: Message):
+    await process_media(client, message, translate=True)
 
 def start_health_server():
     def run():
