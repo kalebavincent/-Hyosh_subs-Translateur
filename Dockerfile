@@ -1,15 +1,18 @@
 FROM python:3.10-slim-bullseye
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    git \          
-    && rm -rf /var/lib/apt/lists/*
+    git \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt main.py ./
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt \
+ && rm -rf /root/.cache
 
 ENV WHISPER_MODEL=small \
     HEALTH_SERVER_PORT=8080 \
