@@ -1,5 +1,7 @@
+# Étape de construction
 FROM python:3.10-slim-bullseye as builder
 
+# Installer les dépendances système minimales
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
@@ -13,6 +15,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
+ARG WHISPER_MODEL=small
+RUN python -c "import whisper; whisper.load_model('$WHISPER_MODEL')"
+
 FROM python:3.10-slim-bullseye
 
 RUN apt-get update && apt-get install -y \
@@ -21,12 +26,11 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
-
+COPY --from=builder /root/.cache/whisper /root/.cache/whisper
 WORKDIR /app
-COPY . .
+COPY bot.py .
 
-ENV WHISPER_MODEL=small \
+ENV WHISPER_MODEL=$WHISPER_MODEL \
     HEALTH_SERVER_PORT=8080 \
     PYTHONUNBUFFERED=1
 
