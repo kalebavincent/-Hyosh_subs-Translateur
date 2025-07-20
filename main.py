@@ -69,10 +69,20 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+    
+    # Ajout de la gestion des requêtes HEAD
+    def do_HEAD(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 def run_health_server():
     server = HTTPServer((HEALTH_SERVER_ADDRESS, HEALTH_SERVER_PORT), HealthCheckHandler)
-    print(f"✅ Serveur de test de vie démarré sur le port {HEALTH_SERVER_PORT}")
+    print(f"✅ Serveur de santé démarré sur le port {HEALTH_SERVER_PORT}")
     server.serve_forever()
 
 def format_timestamp(seconds):
@@ -103,11 +113,35 @@ async def transcribe_audio(file_path: str, model_name: str, status_msg: Message)
 
     print(f"Début de la transcription de : {file_path}")
     start_time = time.time()
-
+    
+    # Callback pour la progression
+    def progress_callback(progress):
+        if user_status.get(user_id, {}).get("cancelled"):
+            return True
+            
+        if progress > 0:
+            elapsed = time.time() - start_time
+            total_est = elapsed / progress if progress > 0 else 0
+            remaining = max(0, total_est - elapsed)
+            
+            asyncio.run_coroutine_threadsafe(
+                status_msg.edit_text(
+                    f"🔠 **Transcription en cours**\n"
+                    f"{progress_bar(progress*100)} {progress*100:.1f}%\n"
+                    f"⏱ Temps écoulé: {elapsed:.0f}s\n"
+                    f"⏳ Temps restant: ~{remaining:.0f}s\n\n",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ Annuler", callback_data="cancel_operation")]
+                    ])
+                ),
+                app.loop
+            )
+    
     result = model.transcribe(
         file_path,
         verbose=True,
-        task="transcribe"
+        task="transcribe",
+        progress_callback=progress_callback
     )
 
     if user_status.get(user_id, {}).get("cancelled"):
@@ -182,6 +216,7 @@ async def translate_srt_content(srt_content: str, status_msg: Message):
 
     start_time = time.time()
     segment_times = []
+    last_update = 0
 
     for idx, (num, timecode, text) in enumerate(entries, start=1):
         if user_status.get(user_id, {}).get("cancelled"):
@@ -201,8 +236,9 @@ async def translate_srt_content(srt_content: str, status_msg: Message):
             avg_time = sum(segment_times) / len(segment_times) if segment_times else 0
             remaining = (total_segments - idx) * avg_time
 
-            # Mise à jour du message toutes les 5 segments
-            if idx % 5 == 0 or idx == total_segments:
+            # Mise à jour max toutes les 5 secondes
+            current_time = time.time()
+            if current_time - last_update > 5 or idx == total_segments:
                 await status_msg.edit_text(
                     f"🌍 **Traduction en cours**\n"
                     f"{progress_bar(progress)} {progress}%\n"
@@ -213,6 +249,7 @@ async def translate_srt_content(srt_content: str, status_msg: Message):
                         [InlineKeyboardButton("❌ Annuler", callback_data="cancel_operation")]
                     ])
                 )
+                last_update = current_time
         else:
             translated = text
 
@@ -220,7 +257,9 @@ async def translate_srt_content(srt_content: str, status_msg: Message):
         translated_content += f"{num}\n{timecode}\n{translated}\n\n"
         processed += 1
 
-        await asyncio.sleep(0.1)
+        # Pause courte pour permettre les annulations
+        if idx % 5 == 0:
+            await asyncio.sleep(0.1)
 
     return translated_content
 
@@ -290,7 +329,6 @@ async def set_model(_, query: CallbackQuery):
 
 @app.on_message(filters.command("model"))
 async def model_command(client: Client, message: Message):
-    # Créer un nouveau message pour la sélection du modèle
     current_model = user_models.get(message.from_user.id, WHISPER_MODEL)
     keyboard = InlineKeyboardMarkup([
         [
@@ -330,6 +368,7 @@ async def process_media(client: Client, message: Message, translate=True):
         return
 
     if message.document and not message.document.mime_type.startswith(('audio/', 'video/')):
+        await message.reply_text("❌ Format de fichier non supporté.")
         return
 
     model_name = user_models.get(message.from_user.id, WHISPER_MODEL)
@@ -348,19 +387,33 @@ async def process_media(client: Client, message: Message, translate=True):
         f"⏳ **Téléchargement**\n"
         f"📦 Taille: {size_mb:.1f} MB\n"
         f"🔠 Modèle: {model_name.upper()}\n\n"
-        "0% " + progress_bar(0)
+        "0% " + progress_bar(0),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Annuler", callback_data="cancel_operation")]
+        ])
     )
 
-    file_path = await message.download()
+    try:
+        file_path = await message.download(progress=lambda current, total: asyncio.create_task(
+            download_progress(status_msg, current, total, size_mb, model_name)
+        ))
+    except Exception as e:
+        await status_msg.edit_text(f"❌ **Erreur téléchargement**\n`{str(e)}`")
+        return
+
     await status_msg.edit_text(
         "✅ **Fichier téléchargé!**\n"
         "🔠 Démarrage de la transcription...\n\n"
-        "0% " + progress_bar(0)
+        "0% " + progress_bar(0),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Annuler", callback_data="cancel_operation")]
+        ])
     )
 
     try:
         srt_content = await transcribe_audio(file_path, model_name, status_msg)
         if srt_content is None:
+            os.remove(file_path)
             return
     except Exception as e:
         await status_msg.edit_text(f"❌ **Erreur transcription**\n`{str(e)}`")
@@ -375,12 +428,17 @@ async def process_media(client: Client, message: Message, translate=True):
         await status_msg.edit_text(
             "✅ **Transcription terminée!**\n"
             "🌍 Démarrage de la traduction...\n\n"
-            "0% " + progress_bar(0)
+            "0% " + progress_bar(0),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Annuler", callback_data="cancel_operation")]
+            ])
         )
 
         try:
             translated_content = await translate_srt_content(srt_content, status_msg)
             if translated_content is None:
+                os.remove(file_path)
+                os.remove(original_srt)
                 return
 
             translated_srt = file_path + ".translated.srt"
@@ -413,7 +471,24 @@ async def process_media(client: Client, message: Message, translate=True):
 
     await status_msg.delete()
 
+async def download_progress(status_msg, current, total, size_mb, model_name):
+    progress = current / total * 100
+    if int(progress) % 5 == 0:  # Mise à jour toutes les 5%
+        await status_msg.edit_text(
+            f"⏳ **Téléchargement**\n"
+            f"📦 Taille: {size_mb:.1f} MB\n"
+            f"🔠 Modèle: {model_name.upper()}\n\n"
+            f"{progress:.1f}% " + progress_bar(progress),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Annuler", callback_data="cancel_operation")]
+            ])
+        )
+
 async def handle_translation(client: Client, message: Message):
+    if not message.reply_to_message or not message.reply_to_message.document:
+        await message.reply_text("🔍 Répondez à un fichier SRT avec /translate")
+        return
+
     status_msg = await message.reply_text(
         "⏳ **Démarrage de la traduction**\n\n"
         "0% " + progress_bar(0),
@@ -422,14 +497,24 @@ async def handle_translation(client: Client, message: Message):
         ])
     )
 
-    srt_path = await message.reply_to_message.download()
+    try:
+        srt_path = await message.reply_to_message.download()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ **Erreur téléchargement**\n`{str(e)}`")
+        return
 
-    with open(srt_path, "r", encoding="utf-8") as f:
-        srt_content = f.read()
+    try:
+        with open(srt_path, "r", encoding="utf-8") as f:
+            srt_content = f.read()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ **Erreur lecture fichier**\n`{str(e)}`")
+        os.remove(srt_path)
+        return
 
     try:
         translated_content = await translate_srt_content(srt_content, status_msg)
         if translated_content is None:
+            os.remove(srt_path)
             return
 
         translated_srt = srt_path + ".translated.srt"
