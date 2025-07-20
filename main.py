@@ -504,6 +504,7 @@ async def process_media(client: Client, message: Message, translate=True):
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("❌ Annuler", callback_data="cancel_operation")]
                 ])
+                )
         except Exception:
             pass
 
