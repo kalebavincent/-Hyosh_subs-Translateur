@@ -580,6 +580,7 @@ async def update_download_status(status_msg, current, total, size_mb, model_name
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Annuler", callback_data="cancel_operation")]
             ])
+            )
     except Exception:
         # Le message a peut-être été supprimé, ignorer l'erreur
         pass
